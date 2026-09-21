@@ -79,7 +79,7 @@ describe('evidence contract identity', () => {
     const refs = projectEvidenceRefs([
       { capabilityId: 'market.quote', runId: 'run-1', claim: 'AAPL trades above 200', fetchedAt: 1000, summary: 'lastPrice 210.5', instrumentId: 'AAPL.US' },
     ]);
-    const newsProjection = projectNewsItems([news()]);
+    const newsProjection = projectNewsItems([news()], { retrievedAt: 2500 });
     const bundle = buildEvidenceBundle(financial, refs, newsProjection);
 
     const roundTripped = parseEvidenceBundle(serializeEvidenceBundle(bundle));
@@ -115,18 +115,61 @@ describe('evidence contract projections', () => {
     expect(item.provenance).toMatchObject({ runId: 'run-1', toolCallId: 'call-1', capabilityId: 'market.quote', provider: 'longbridge' });
   });
 
+  it('unifies resolved asOf between financial semantics and freshness, honoring value.asOf over envelope.asOf', () => {
+    const env = envelope({
+      asOf: 900,
+      values: [
+        { metric: 'granular', originalValue: 1, normalizedValue: 1, asOf: 950 },
+        { metric: 'fallback-to-envelope', originalValue: 2, normalizedValue: 2 },
+      ],
+    });
+    const { evidence } = projectFinancialEvidence([env]);
+    expect(evidence[0]!.financial?.asOf).toBe(950);
+    expect(evidence[0]!.freshness.asOf).toBe(950);
+
+    expect(evidence[1]!.financial?.asOf).toBe(900);
+    expect(evidence[1]!.freshness.asOf).toBe(900);
+  });
+
+  it('handles value.asOf present when envelope.asOf is undefined', () => {
+    const env = envelope({
+      asOf: undefined,
+      values: [{ metric: 'standalone', originalValue: 1, normalizedValue: 1, asOf: 999 }],
+    });
+    const { evidence } = projectFinancialEvidence([env]);
+    expect(evidence[0]!.financial?.asOf).toBe(999);
+    expect(evidence[0]!.freshness.asOf).toBe(999);
+  });
+
   it('never fabricates canonical URLs for structured finance sources', () => {
     const { sources } = projectFinancialEvidence([envelope()]);
     expect(sources[0]!.canonicalUrl).toBeUndefined();
   });
 
-  it('preserves document semantics for news sources', () => {
-    const { sources, evidence } = projectNewsItems([news()]);
+  it('preserves document semantics for news sources and converts seconds to ms without forging retrievedAt', () => {
+    const item = news({ timestamp: 1726000000 }); // epoch seconds
+    const { sources, evidence } = projectNewsItems([item], { retrievedAt: 1726005000000 });
     expect(sources[0]!.kind).toBe('news');
     expect(sources[0]!.canonicalUrl).toBe('https://example.com/apple-record-quarter?utm_source=x');
+    // Seconds to milliseconds conversion: 1726000000 s -> 1726000000000 ms
+    expect(sources[0]!.publishedAt).toBe(1726000000000);
+    expect(sources[0]!.retrievedAt).toBe(1726005000000);
     expect(evidence[0]!.kind).toBe('text_excerpt');
     expect(evidence[0]!.excerpt?.text).toBe('Apple reported revenue above consensus.');
+    expect(evidence[0]!.freshness.retrievedAt).toBe(1726005000000);
+    expect(evidence[0]!.freshness.asOf).toBe(1726000000000);
     expect(evidence[0]!.provenance.instrumentId).toBe('AAPL.US');
+  });
+
+  it('falls back to Date.now() for retrievedAt when caller omits it, never using timestamp as retrievedAt', () => {
+    const before = Date.now();
+    const { sources, evidence } = projectNewsItems([news({ timestamp: 1726000000 })]);
+    const after = Date.now();
+    expect(sources[0]!.publishedAt).toBe(1726000000000);
+    expect(sources[0]!.retrievedAt).toBeGreaterThanOrEqual(before);
+    expect(sources[0]!.retrievedAt).toBeLessThanOrEqual(after);
+    expect(sources[0]!.retrievedAt).not.toBe(1726000000);
+    expect(evidence[0]!.freshness.retrievedAt).toBe(sources[0]!.retrievedAt);
   });
 
   it('preserves excerpt location for filing-style document evidence', () => {
@@ -211,7 +254,7 @@ describe('evidence bundle mixed-source integration', () => {
     const refs = projectEvidenceRefs([
       { capabilityId: 'market.quote', runId: 'run-1', claim: 'AAPL trades above 200', fetchedAt: 1000, summary: 'lastPrice 210.5', instrumentId: 'AAPL.US' },
     ]);
-    const newsProjection = projectNewsItems([news()]);
+    const newsProjection = projectNewsItems([news()], { retrievedAt: 2500 });
     const filing = projectTextEvidence({
       kind: 'filing',
       url: 'https://www.sec.gov/archives/abc-10q.htm',

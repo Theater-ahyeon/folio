@@ -11,6 +11,7 @@ export {
   projectEvidenceRefs,
   projectFinancialEvidence,
   projectNewsItems,
+  type NewsItemProjectionOptions,
   projectTextEvidence,
   serializeEvidenceBundle,
   type EvidenceBundlePart,

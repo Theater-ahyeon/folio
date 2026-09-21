@@ -64,12 +64,13 @@ export function projectFinancialEvidence(
       },
     });
     for (const value of envelope.values) {
+      const resolvedAsOf = value.asOf ?? envelope.asOf;
       evidence.push({
         evidenceId: deriveEvidenceId(sourceId, 'structured_value', [
           value.metric,
           stableJson(value.normalizedValue),
           value.period ?? '',
-          String(value.asOf ?? ''),
+          String(resolvedAsOf ?? ''),
         ], envelope.retrievedAt),
         sourceId,
         kind: 'structured_value',
@@ -81,11 +82,11 @@ export function projectFinancialEvidence(
           ...(value.unit ? { unit: value.unit } : {}),
           ...(value.currency ? { currency: value.currency } : {}),
           ...(value.period ? { period: value.period } : {}),
-          ...(value.asOf ?? envelope.asOf ? { asOf: value.asOf ?? envelope.asOf } : {}),
+          ...(resolvedAsOf !== undefined ? { asOf: resolvedAsOf } : {}),
         },
         freshness: {
           retrievedAt: envelope.retrievedAt,
-          ...(envelope.asOf !== undefined ? { asOf: envelope.asOf } : {}),
+          ...(resolvedAsOf !== undefined ? { asOf: resolvedAsOf } : {}),
           stale: envelope.stale,
         },
         availability: 'available',
@@ -156,27 +157,48 @@ export function projectEvidenceRefs(refs: EvidenceRef[]): EvidenceRefProjection 
   return { sources, evidence, claims };
 }
 
+export interface NewsItemProjectionOptions {
+  /**
+   * Epoch ms at which this news batch was retrieved by Folio. When omitted,
+   * defaults to Date.now() so NewsItem.timestamp (epoch seconds) is never
+   * misinterpreted as a retrieval timestamp.
+   */
+  retrievedAt?: number;
+}
+
 /** Project fetched news items into news sources with text excerpts. */
-export function projectNewsItems(items: NewsItem[]): FinancialEvidenceProjection {
+export function projectNewsItems(
+  items: NewsItem[],
+  options: NewsItemProjectionOptions = {}
+): FinancialEvidenceProjection {
   const sources: EvidenceSource[] = [];
   const evidence: EvidenceItem[] = [];
+  const fallbackRetrievedAt = options.retrievedAt ?? Date.now();
   for (const item of items) {
     const sourceId = deriveSourceId('news', { url: item.url });
+    // NewsItem.timestamp is epoch SECONDS per core convention;
+    // EvidenceSource.publishedAt/retrievedAt is epoch MILLISECONDS.
+    const publishedAtMs = Number.isFinite(item.timestamp) ? Math.round(item.timestamp * 1000) : undefined;
+    const retrievedAtMs = options.retrievedAt ?? fallbackRetrievedAt;
     sources.push({
       sourceId,
       kind: 'news',
       canonicalUrl: item.url,
-      retrievedAt: item.timestamp,
-      publishedAt: item.timestamp,
+      retrievedAt: retrievedAtMs,
+      ...(publishedAtMs !== undefined ? { publishedAt: publishedAtMs } : {}),
     });
     const text = item.summary || item.title;
     if (!text) continue;
     evidence.push({
-      evidenceId: deriveEvidenceId(sourceId, 'text_excerpt', [text, 'summary'], item.timestamp),
+      evidenceId: deriveEvidenceId(sourceId, 'text_excerpt', [text, 'summary'], retrievedAtMs),
       sourceId,
       kind: 'text_excerpt',
       excerpt: { text },
-      freshness: { retrievedAt: item.timestamp, stale: false },
+      freshness: {
+        retrievedAt: retrievedAtMs,
+        ...(publishedAtMs !== undefined ? { asOf: publishedAtMs } : {}),
+        stale: false,
+      },
       availability: 'available',
       provenance: {
         ...(item.instrumentId ? { instrumentId: item.instrumentId } : {}),
