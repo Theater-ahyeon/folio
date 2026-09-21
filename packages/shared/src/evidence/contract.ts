@@ -159,27 +159,25 @@ export function projectEvidenceRefs(refs: EvidenceRef[]): EvidenceRefProjection 
 
 export interface NewsItemProjectionOptions {
   /**
-   * Epoch ms at which this news batch was retrieved by Folio. When omitted,
-   * defaults to Date.now() so NewsItem.timestamp (epoch seconds) is never
-   * misinterpreted as a retrieval timestamp.
+   * Epoch ms at which this news batch was retrieved by Folio. The caller
+   * must supply the actual retrieval time; projection time is not retrieval time.
    */
-  retrievedAt?: number;
+  retrievedAt: number;
 }
 
 /** Project fetched news items into news sources with text excerpts. */
 export function projectNewsItems(
   items: NewsItem[],
-  options: NewsItemProjectionOptions = {}
+  options: NewsItemProjectionOptions
 ): FinancialEvidenceProjection {
   const sources: EvidenceSource[] = [];
   const evidence: EvidenceItem[] = [];
-  const fallbackRetrievedAt = options.retrievedAt ?? Date.now();
+  const retrievedAtMs = options.retrievedAt;
   for (const item of items) {
     const sourceId = deriveSourceId('news', { url: item.url });
     // NewsItem.timestamp is epoch SECONDS per core convention;
     // EvidenceSource.publishedAt/retrievedAt is epoch MILLISECONDS.
     const publishedAtMs = Number.isFinite(item.timestamp) ? Math.round(item.timestamp * 1000) : undefined;
-    const retrievedAtMs = options.retrievedAt ?? fallbackRetrievedAt;
     sources.push({
       sourceId,
       kind: 'news',

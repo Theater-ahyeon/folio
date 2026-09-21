@@ -161,15 +161,16 @@ describe('evidence contract projections', () => {
     expect(evidence[0]!.provenance.instrumentId).toBe('AAPL.US');
   });
 
-  it('falls back to Date.now() for retrievedAt when caller omits it, never using timestamp as retrievedAt', () => {
-    const before = Date.now();
-    const { sources, evidence } = projectNewsItems([news({ timestamp: 1726000000 })]);
-    const after = Date.now();
-    expect(sources[0]!.publishedAt).toBe(1726000000000);
-    expect(sources[0]!.retrievedAt).toBeGreaterThanOrEqual(before);
-    expect(sources[0]!.retrievedAt).toBeLessThanOrEqual(after);
-    expect(sources[0]!.retrievedAt).not.toBe(1726000000);
-    expect(evidence[0]!.freshness.retrievedAt).toBe(sources[0]!.retrievedAt);
+  it('preserves explicit epoch-zero retrieval time without substituting projection time', () => {
+    const { sources, evidence } = projectNewsItems([news({ timestamp: 1 })], { retrievedAt: 0 });
+    expect(sources[0]!.publishedAt).toBe(1000);
+    expect(sources[0]!.retrievedAt).toBe(0);
+    expect(evidence[0]!.freshness.retrievedAt).toBe(0);
+  });
+
+  it('requires retrieval metadata instead of inventing it during projection', () => {
+    // @ts-expect-error Retrieval time must come from the caller.
+    expect(() => projectNewsItems([news()])).toThrow();
   });
 
   it('preserves excerpt location for filing-style document evidence', () => {
