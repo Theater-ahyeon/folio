@@ -78,7 +78,7 @@ describe('buildBrief', () => {
     expect(brief.quiet).toEqual({ count: 0, message: 'No monitored securities.' })
   })
 
-  it('every item carries an explainable source, evidence references, and context version when applicable', () => {
+  it('every item carries an explainable source, provenance references, and context version when applicable', () => {
     const brief = buildBrief(
       inputs({
         diffs: [
@@ -103,15 +103,15 @@ describe('buildBrief', () => {
     )
     expect(brief.items.length).toBeGreaterThan(0)
     const diffItem = brief.items.find((item) => item.id === 'diff-NVDA.US')
-    expect(diffItem?.evidenceRefs).toContain('capability:company.valuation run:run-1 fetchedAt:1700000000')
+    expect(diffItem?.provenanceRefs).toContain('capability:company.valuation run:run-1 fetchedAt:1700000000')
     expect(diffItem?.contextVersion).toBe('diff-diff-NVDA.US')
 
     const thesisItem = brief.items.find((item) => item.id === 'thesis-NVDA.US')
-    expect(thesisItem?.evidenceRefs).toContain('capability:company.valuation run:run-1 fetchedAt:1700000000')
+    expect(thesisItem?.provenanceRefs).toContain('capability:company.valuation run:run-1 fetchedAt:1700000000')
     expect(thesisItem?.contextVersion).toBe('diff-diff-NVDA.US')
 
     const autoItem = brief.items.find((item) => item.id === 'automation-run-auto')
-    expect(autoItem?.evidenceRefs).toContain('automation-run:run-auto:material')
+    expect(autoItem?.provenanceRefs).toContain('automation-run:run-auto:material')
     expect(autoItem?.contextVersion).toBe('run-run-auto')
   })
 

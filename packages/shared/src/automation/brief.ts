@@ -26,8 +26,8 @@ export interface BriefItem {
   severity: BriefSeverity
   /** Structured explainability payload for "Why am I seeing this?". */
   payload?: Record<string, unknown>
-  /** Stable evidence / source references backing this brief conclusion (Issue #103 / #100). */
-  evidenceRefs?: string[]
+  /** Provenance and correlation anchors backing this brief conclusion (Issue #103). */
+  provenanceRefs?: string[]
   /** Versioned context / snapshot id this item was derived from. */
   contextVersion?: string
 }
@@ -156,7 +156,7 @@ function watchlistItems(inputs: BriefInputs): BriefItem[] {
   const diffItems: BriefItem[] = inputs.diffs
     .filter((diff) => diff.material)
     .map((diff) => {
-      const evidenceRefs = diff.changes.flatMap((c) => c.evidence)
+      const provenanceRefs = diff.changes.flatMap((c) => c.evidence)
       return {
         id: `diff-${diff.symbol}`,
         symbol: diff.symbol,
@@ -165,7 +165,7 @@ function watchlistItems(inputs: BriefInputs): BriefItem[] {
         source: 'Watchlist',
         severity: 'warning',
         payload: { diffId: diff.id, changes: diff.changes.length },
-        ...(evidenceRefs.length > 0 ? { evidenceRefs } : {}),
+        ...(provenanceRefs.length > 0 ? { provenanceRefs } : {}),
         contextVersion: `diff-${diff.id}`,
       }
     })
@@ -177,7 +177,7 @@ function thesisItems(inputs: BriefInputs): BriefItem[] {
   return inputs.diffs
     .filter((diff) => diff.thesisImpact !== undefined && diff.thesisImpact.direction !== 'unchanged')
     .map((diff) => {
-      const evidenceRefs = diff.changes.flatMap((c) => c.evidence)
+      const provenanceRefs = diff.changes.flatMap((c) => c.evidence)
       return {
         id: `thesis-${diff.symbol}`,
         symbol: diff.symbol,
@@ -186,7 +186,7 @@ function thesisItems(inputs: BriefInputs): BriefItem[] {
         source: 'Thesis',
         severity: diff.thesisImpact?.direction === 'invalidated' ? 'critical' : 'warning',
         payload: { diffId: diff.id, direction: diff.thesisImpact?.direction },
-        ...(evidenceRefs.length > 0 ? { evidenceRefs } : {}),
+        ...(provenanceRefs.length > 0 ? { provenanceRefs } : {}),
         contextVersion: `diff-${diff.id}`,
       }
     })
@@ -209,9 +209,9 @@ function automationItems(inputs: BriefInputs): BriefItem[] {
     .filter((run) => run.materialChanges > 0 || run.notified)
     .map((run) => {
       const isMaterial = run.materialChanges > 0
-      const evidenceRefs: string[] = []
+      const provenanceRefs: string[] = []
       if (isMaterial) {
-        evidenceRefs.push(`automation-run:${run.id}:material`)
+        provenanceRefs.push(`automation-run:${run.id}:material`)
       }
       return {
         id: `automation-${run.id}`,
@@ -228,7 +228,7 @@ function automationItems(inputs: BriefInputs): BriefItem[] {
           analyzed: run.analyzed,
           failures: run.failures,
         },
-        ...(evidenceRefs.length > 0 ? { evidenceRefs } : {}),
+        ...(provenanceRefs.length > 0 ? { provenanceRefs } : {}),
         ...(run.id ? { contextVersion: `run-${run.id}` } : {}),
       }
     })
