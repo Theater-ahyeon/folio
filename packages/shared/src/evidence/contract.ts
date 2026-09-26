@@ -69,6 +69,9 @@ export function projectFinancialEvidence(
         evidenceId: deriveEvidenceId(sourceId, 'structured_value', [
           value.metric,
           stableJson(value.normalizedValue),
+          stableJson(value.originalValue),
+          value.unit ?? '',
+          value.currency ?? '',
           value.period ?? '',
           String(resolvedAsOf ?? ''),
         ], envelope.retrievedAt),
@@ -174,6 +177,8 @@ export function projectNewsItems(
   const evidence: EvidenceItem[] = [];
   const retrievedAtMs = options.retrievedAt;
   for (const item of items) {
+    const text = item.summary || item.title;
+    if (!text) continue;
     const sourceId = deriveSourceId('news', { url: item.url });
     // NewsItem.timestamp is epoch SECONDS per core convention;
     // EvidenceSource.publishedAt/retrievedAt is epoch MILLISECONDS.
@@ -185,8 +190,6 @@ export function projectNewsItems(
       retrievedAt: retrievedAtMs,
       ...(publishedAtMs !== undefined ? { publishedAt: publishedAtMs } : {}),
     });
-    const text = item.summary || item.title;
-    if (!text) continue;
     evidence.push({
       evidenceId: deriveEvidenceId(sourceId, 'text_excerpt', [text, 'summary'], retrievedAtMs),
       sourceId,
@@ -331,7 +334,7 @@ function deriveSourceId(
   kind: EvidenceSourceKind,
   origin: Record<string, unknown>
 ): string {
-  return `src_${hashText(`${kind}|${stableJson(origin)}`).slice(0, 24)}`;
+  return `src_${hashText(stableJson([kind, origin])).slice(0, 24)}`;
 }
 
 function deriveEvidenceId(
@@ -340,11 +343,11 @@ function deriveEvidenceId(
   content: string[],
   retrievedAt: number
 ): string {
-  return `ev_${hashText([sourceId, kind, ...content, String(retrievedAt)].join('|')).slice(0, 24)}`;
+  return `ev_${hashText(stableJson([sourceId, kind, content, retrievedAt])).slice(0, 24)}`;
 }
 
 function deriveClaimId(statement: string, instrumentId?: string): string {
-  return `claim_${hashText([statement, instrumentId ?? ''].join('|')).slice(0, 24)}`;
+  return `claim_${hashText(stableJson([statement, instrumentId ?? ''])).slice(0, 24)}`;
 }
 
 /** Order-stable JSON serialization so identity hashes never depend on key order. */

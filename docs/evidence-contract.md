@@ -51,7 +51,7 @@ EvidenceSource ──< EvidenceItem >── EvidenceClaim ──> Answer / Resea
 |------|------------------|------|
 | `projectFinancialEvidence` | `FinancialEvidenceEnvelope[]` | 每个信封 → 1 个 `structured_finance` 来源 + 每个 value 一条 `structured_value` 证据（保留 metric/unit/currency/period/asOf/originalValue 金融语义） |
 | `projectEvidenceRefs` | `EvidenceRef[]` | 每条引用 → 1 个 `tool` 来源 + 1 条 `tool_result` 证据 + 1 条 `unverified` 论点 |
-| `projectNewsItems` | `NewsItem[]` | 每条新闻 → 1 个 `news` 来源（canonicalUrl=原文 URL）+ 1 条 `text_excerpt` 证据 |
+| `projectNewsItems` | `NewsItem[]` | 有标题或摘要的每条新闻 → 1 个 `news` 来源（canonicalUrl=原文 URL）+ 1 条 `text_excerpt` 证据；两者皆空时跳过 |
 | `projectTextEvidence` | 通用文档输入 | 1 个 `filing`/`web`/`news`/`other` 来源 + 1 条 `text_excerpt` 证据（保留 excerpt/location，支持 authority 元数据） |
 
 组装与守卫：`buildEvidenceBundle`（按 id 去重合并、claim 并集 evidenceIds）、
@@ -65,18 +65,21 @@ EvidenceSource ──< EvidenceItem >── EvidenceClaim ──> Answer / Resea
   缺 URL 是有语义的，不是缺失。
 - **authority 元数据只在实际已知时填写**（如监管备案 =
   `{ primary: true, sourceClass: 'regulator' }`），投影从不猜测。
-- **冲突与不可用是显式状态**（`availability: 'conflicted' | 'unavailable'`），
-  不允许静默丢弃。
-- **验证状态**首版恒为 `unverified`；claim 级验证（#13）与来源漂移检测（#20）
-  是独立关注点，接入时只需更新 `verification` / `verifiedBy`，契约不变。
-- 不为此引入图数据库；不要求各来源类型字段完全一致，领域专属元数据放在
-  `providerMeta` / `provenance` 嵌套扩展中原样保留。
+- **冲突与不可用有显式状态位**（`availability: 'conflicted' | 'unavailable'`）。
+  当前投影仅产出 `available`；金融数据的 `reconciliation` 只保留在
+  `source.providerMeta`，尚未映射到 `availability`。
+- **验证状态**首版恒为 `unverified`。现有
+  `packages/shared/src/research/claim-verifier.ts` 使用独立的 claim ID 与状态契约；
+  接入 claim 级验证（#13）或来源漂移检测（#20）时需要显式映射。
+- 不为此引入图数据库；不要求各来源类型字段完全一致。投影只保留已显式映射的
+  `providerMeta` / `provenance` 字段，未映射的领域字段不会自动透传。
 
 ## 消费方
 
-- **Source Inspector（#30）与引用检查器**可直接消费 bundle 投影：来源类别、
-  URL、摘录、溯源一应俱全，无需再各自解析三套原始类型。
-- **评测（#14/#15）**可基于 claimId/evidenceId 统计引用覆盖率。
+- **Source Inspector（#30）与引用检查器**尚未接入 bundle；当前 Inspector
+  仍由 `Message.financialEvidence` / `toolCalls` 组装。后续接线可使用 bundle
+  的来源类别、URL、摘录与溯源字段，但需显式处理现有 ID 空间的映射。
+- **评测（#14/#15）**后续可基于 claimId/evidenceId 统计引用覆盖率。
 
 ## 集成示例
 

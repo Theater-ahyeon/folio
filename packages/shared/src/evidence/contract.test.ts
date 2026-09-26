@@ -74,6 +74,27 @@ describe('evidence contract identity', () => {
     expect(b.sources[0]!.sourceId).toBe(a.sources[0]!.sourceId);
   });
 
+  it('keeps observations with different units or currencies distinct in a bundle', () => {
+    const values = [
+      { metric: 'revenue', originalValue: 100, normalizedValue: 100, unit: 'million', currency: 'USD' },
+      { metric: 'revenue', originalValue: 100, normalizedValue: 100, unit: 'million', currency: 'EUR' },
+      { metric: 'revenue', originalValue: 100, normalizedValue: 100, unit: 'billion', currency: 'USD' },
+      { metric: 'revenue', originalValue: 100, normalizedValue: 100, unit: 'a|b', currency: 'c' },
+      { metric: 'revenue', originalValue: 100, normalizedValue: 100, unit: 'a', currency: 'b|c' },
+    ];
+    const bundle = buildEvidenceBundle(projectFinancialEvidence([envelope({ values })]));
+    expect(bundle.evidence).toHaveLength(5);
+    expect(new Set(bundle.evidence.map((item) => item.evidenceId)).size).toBe(5);
+  });
+
+  it('separates claim statements and instrument scopes containing delimiters', () => {
+    const projection = projectEvidenceRefs([
+      { capabilityId: 'market.quote', runId: 'run-1', claim: 'a|b', fetchedAt: 1000, summary: 'first', instrumentId: 'c' },
+      { capabilityId: 'market.quote', runId: 'run-1', claim: 'a', fetchedAt: 1000, summary: 'second', instrumentId: 'b|c' },
+    ]);
+    expect(projection.claims[0]!.claimId).not.toBe(projection.claims[1]!.claimId);
+  });
+
   it('keeps ids stable across serialize → parse round-trips', () => {
     const financial = projectFinancialEvidence([envelope()]);
     const refs = projectEvidenceRefs([
@@ -159,6 +180,12 @@ describe('evidence contract projections', () => {
     expect(evidence[0]!.freshness.retrievedAt).toBe(1726005000000);
     expect(evidence[0]!.freshness.asOf).toBe(1726000000000);
     expect(evidence[0]!.provenance.instrumentId).toBe('AAPL.US');
+  });
+
+  it('skips news items without excerpt text without leaving orphan sources', () => {
+    const projection = projectNewsItems([news({ title: '', summary: '' })], { retrievedAt: 2500 });
+    expect(projection.sources).toHaveLength(0);
+    expect(projection.evidence).toHaveLength(0);
   });
 
   it('preserves explicit epoch-zero retrieval time without substituting projection time', () => {
