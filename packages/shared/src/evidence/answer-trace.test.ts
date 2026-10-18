@@ -135,3 +135,124 @@ describe('buildAnswerEvidenceTrace', () => {
     expect(invalidTrace.citations).toHaveLength(0);
   });
 });
+
+describe('buildAnswerEvidenceTrace fence boundaries', () => {
+  const body = (id: string) => JSON.stringify({
+    version: 1,
+    type: 'metric_grid',
+    metrics: [{ label: 'Last', value: 210.5, unit: 'price', currency: 'USD' }],
+    evidenceIds: [id],
+  });
+  const example = body('fe_example');
+  const live = body('fe_env1');
+  const liveBlock = ['```folio-block', live, '```'].join('\n');
+
+  // Mirror parseAnswerSegments.fences.test.ts with valid cited payloads so
+  // literal examples cannot pass merely because their JSON is invalid.
+  const cases: { name: string; answer: string; ids: string[] }[] = [
+    {
+      name: 'keeps typed examples inside ordinary backtick fences opaque',
+      answer: ['```json', '```folio-block', example, '```', '```', 'After'].join('\n'),
+      ids: [],
+    },
+    {
+      name: 'keeps typed examples inside ordinary tilde fences opaque',
+      answer: ['~~~markdown', '~~~folio-block', example, '~~~', '~~~', 'After'].join('\n'),
+      ids: [],
+    },
+    {
+      name: 'requires the same closing marker and at least the opening length',
+      answer: ['````folio-block', example, '```', '~~~', '````', liveBlock].join('\n'),
+      ids: ['fe_env1'],
+    },
+    {
+      name: 'accepts a longer matching closing fence',
+      answer: ['```folio-block', live, '````', 'After'].join('\n'),
+      ids: ['fe_env1'],
+    },
+    {
+      name: 'supports CRLF delimiters and preserves the original answer',
+      answer: ['Before', '```folio-block', live, '```', 'After'].join('\r\n'),
+      ids: ['fe_env1'],
+    },
+    {
+      name: 'accepts three spaces but not four before a fence',
+      answer: ['   ```folio-block', live, '   ```', '    ```folio-block', example, '    ```'].join('\n'),
+      ids: ['fe_env1'],
+    },
+    {
+      name: 'keeps an unclosed ordinary fence opaque',
+      answer: ['```ts', 'const example = true;', '```folio-block', example].join('\n'),
+      ids: [],
+    },
+    {
+      name: 'resumes typed parsing after a closed ordinary fence',
+      answer: ['Before', '```json', '```folio-block', example, '```', liveBlock, 'After'].join('\n'),
+      ids: ['fe_env1'],
+    },
+    {
+      name: 'ignores inline and invalid-info backticks before a live block',
+      answer: ['Text ```folio-block', example, '```folio-block`', liveBlock].join('\n'),
+      ids: ['fe_env1'],
+    },
+    {
+      name: 'does not close a tilde block at backticks or an incomplete marker',
+      answer: ['~~~folio-block', example, '```', '~~', '~~~', liveBlock].join('\n'),
+      ids: ['fe_env1'],
+    },
+    {
+      name: 'accepts a valid tilde block',
+      answer: ['~~~folio-block', live, '~~~'].join('\n'),
+      ids: ['fe_env1'],
+    },
+    {
+      name: 'accepts a valid longer backtick block',
+      answer: ['````folio-block', live, '`````'].join('\n'),
+      ids: ['fe_env1'],
+    },
+    {
+      name: 'keeps examples inside longer ordinary fences opaque',
+      answer: ['````markdown', '```folio-block', example, '```', '````', liveBlock].join('\n'),
+      ids: ['fe_env1'],
+    },
+    {
+      name: 'omits valid JSON in an unclosed typed fence',
+      answer: ['~~~folio-block', live].join('\n'),
+      ids: [],
+    },
+    {
+      name: 'does not close a longer typed fence at a shorter marker',
+      answer: ['````folio-block', live, '```'].join('\n'),
+      ids: [],
+    },
+    {
+      name: 'preserves citation order across fence styles and literal examples',
+      answer: [liveBlock, '````markdown', '```folio-block', example, '```', '````',
+        '~~~folio-block', body('fe_env2'), '~~~'].join('\n'),
+      ids: ['fe_env1', 'fe_env2'],
+    },
+  ];
+
+  for (const { name, answer, ids } of cases) {
+    it(name, () => {
+      const trace = buildAnswerEvidenceTrace({
+        sessionId: 'session-1',
+        runId: 'run-1',
+        question: 'q',
+        answer,
+        financialEvidence: [envelope('fe_env1'), envelope('fe_env2', { asOf: 800 })],
+      });
+
+      expect(trace.answer).toBe(answer);
+      expect(trace.citations).toEqual(ids.map((id, blockIndex) => ({
+        blockIndex,
+        blockType: 'metric_grid',
+        citedEvidenceIds: [id],
+        mappedEvidenceIds: trace.bundle.evidence
+          .filter((item) => item.provenance.envelopeId === id)
+          .map((item) => item.evidenceId),
+        unmappedEvidenceIds: [],
+      })));
+    });
+  }
+});

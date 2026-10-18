@@ -1,5 +1,5 @@
 import type { AnswerBlock, EvidenceBundle, FinancialEvidenceEnvelope } from '@finagent/core';
-import { ANSWER_BLOCK_FENCE_LANG, parseAnswerBlock } from '@finagent/core';
+import { parseAnswerBlock, parseAnswerSegments } from '@finagent/core';
 import { buildEvidenceBundle, projectFinancialEvidence } from './contract.ts';
 
 /**
@@ -16,9 +16,6 @@ import { buildEvidenceBundle, projectFinancialEvidence } from './contract.ts';
  */
 
 export const ANSWER_TRACE_SCHEMA_VERSION = 'folio-answer-trace/v1' as const;
-
-const FENCE_OPEN = /^[ \t]{0,3}```(.*)$/;
-const FENCE_CLOSE = /^[ \t]{0,3}```[ \t]*$/;
 
 export interface AnswerBlockCitation {
   /** Position of the block among the answer's typed blocks (0-based). */
@@ -103,37 +100,12 @@ export function buildAnswerEvidenceTrace(input: BuildAnswerEvidenceTraceInput): 
   };
 }
 
-/**
- * Extract the closed `folio-block` fence bodies from an answer string, in
- * order. Mirrors the renderer's fence rules (packages/ui parseAnswerSegments):
- * only fences whose info string is exactly the block language qualify, and an
- * unclosed fence — a streaming answer mid-flight — yields no block.
- */
+/** Extract valid, closed typed blocks using the renderer's shared fence parser. */
 function extractTypedBlocks(answer: string): AnswerBlock[] {
   const blocks: AnswerBlock[] = [];
-  const lines = answer.split('\n');
-  let index = 0;
-  while (index < lines.length) {
-    const open = (lines[index] ?? '').match(FENCE_OPEN);
-    if (!open || open[1].trim() !== ANSWER_BLOCK_FENCE_LANG) {
-      index += 1;
-      continue;
-    }
-    const body: string[] = [];
-    let closed = false;
-    index += 1;
-    while (index < lines.length) {
-      const line = lines[index] ?? '';
-      if (FENCE_CLOSE.test(line)) {
-        closed = true;
-        index += 1;
-        break;
-      }
-      body.push(line);
-      index += 1;
-    }
-    if (!closed) break;
-    const result = parseAnswerBlock(body.join('\n'));
+  for (const segment of parseAnswerSegments(answer)) {
+    if (segment.kind !== 'block' || !segment.closed) continue;
+    const result = parseAnswerBlock(segment.body);
     if (result.ok && result.block) blocks.push(result.block);
   }
   return blocks;
