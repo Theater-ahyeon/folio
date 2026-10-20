@@ -92,6 +92,8 @@ export interface EvidenceFreshness {
   /** Market-time of the fact itself, when known. */
   asOf?: number;
   stale: boolean;
+  /** Provider-reported feed delay, independent of cache staleness; absent when unknown. */
+  delayed?: boolean;
 }
 
 export interface EvidenceItem {
