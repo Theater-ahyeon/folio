@@ -62,6 +62,29 @@ describe('CapabilityExecutor.run', () => {
     expect(record.status).toBe('unavailable');
   });
 
+  // Production runs capabilities through the router-backed fetchers
+  // (`kernelHost` builds the registry with `createRouterFetchers`), so the
+  // failure that reaches the executor carries the normalized provider code
+  // emitted by `toProviderError` — never the vendor `LONGBRIDGE_*` code used
+  // above. These are the same "can't serve right now" cases the table
+  // documents (missing auth / rate limited / timed out).
+  for (const [code, message] of [
+    ['AUTH_EXPIRED', 'Longbridge session expired. Reconnect from the Connections page.'],
+    ['RATE_LIMITED', 'Longbridge rate limit reached. Wait a moment and retry.'],
+    ['TIMEOUT', 'Longbridge request timed out.'],
+  ] as const) {
+    it(`maps the router-backed provider code ${code} to unavailable`, async () => {
+      const executor = new CapabilityExecutor();
+      const cap = makeCap('market.quote', 'get_quote', async () => {
+        throw Object.assign(new Error(message), { code });
+      });
+
+      const { record } = await executor.run(cap, {});
+
+      expect(record.status).toBe('unavailable');
+    });
+  }
+
   it('records cancelled when a capability exceeds its timeout', async () => {
     const executor = new CapabilityExecutor();
     const cap = makeCap('market.quote', 'get_quote', async (_input, ctx) => {
@@ -75,6 +98,30 @@ describe('CapabilityExecutor.run', () => {
 
     expect(record.status).toBe('cancelled');
     expect(record.error).toContain('timed out');
+  });
+
+  it('records cancelled when an uncooperative capability ignores the timeout signal', async () => {
+    const executor = new CapabilityExecutor();
+    let release!: () => void;
+    const pending = new Promise<void>(resolve => {
+      release = resolve;
+    });
+    const cap = makeCap('market.slow', 'get_slow', async () => {
+      await pending;
+      return result({ completed: true });
+    });
+
+    const releaseTimer = setTimeout(release, 20);
+    try {
+      const outcome = await executor.run(cap, {}, { timeoutMs: 5 });
+
+      expect(outcome.record.status).toBe('cancelled');
+      expect(outcome.record.error).toContain('timed out');
+      expect(outcome.result).toBeUndefined();
+    } finally {
+      clearTimeout(releaseTimer);
+      release();
+    }
   });
 
   it('records cancelled when the external signal aborts mid-run', async () => {
@@ -92,6 +139,33 @@ describe('CapabilityExecutor.run', () => {
     const { record } = await running;
 
     expect(record.status).toBe('cancelled');
+  });
+
+  it('records cancelled when an uncooperative capability ignores the external abort signal', async () => {
+    const executor = new CapabilityExecutor();
+    const controller = new AbortController();
+    let release!: () => void;
+    const pending = new Promise<void>(resolve => {
+      release = resolve;
+    });
+    const cap = makeCap('market.slow', 'get_slow', async () => {
+      await pending;
+      return result({ completed: true });
+    });
+
+    const releaseTimer = setTimeout(release, 20);
+    const abortTimer = setTimeout(() => controller.abort(new Error('user cancelled')), 5);
+    try {
+      const outcome = await executor.run(cap, {}, { signal: controller.signal });
+
+      expect(outcome.record.status).toBe('cancelled');
+      expect(outcome.record.error).toContain('user cancelled');
+      expect(outcome.result).toBeUndefined();
+    } finally {
+      clearTimeout(releaseTimer);
+      clearTimeout(abortTimer);
+      release();
+    }
   });
 });
 

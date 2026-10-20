@@ -26,6 +26,10 @@ export interface BriefItem {
   severity: BriefSeverity
   /** Structured explainability payload for "Why am I seeing this?". */
   payload?: Record<string, unknown>
+  /** Provenance and correlation anchors backing this brief conclusion (Issue #103). */
+  provenanceRefs?: string[]
+  /** Versioned context / snapshot id this item was derived from. */
+  contextVersion?: string
 }
 
 export interface BriefQuietState {
@@ -89,16 +93,27 @@ const SEVERITY_RANK: Record<BriefSeverity, number> = {
 
 /** Build a deterministic DailyBrief from app-domain inputs. */
 export function buildBrief(inputs: BriefInputs, now: number = Date.now()): DailyBrief {
+  // `inputs.runs` is the full run history, but the brief is day-scoped: both the
+  // attention items and the quiet scope must collapse to today's latest run per
+  // rule, otherwise stale runs keep resurfacing as "things need your attention".
+  const todaysRuns = latestRunsForCurrentDay(inputs.runs, now)
   const items = [
     ...portfolioItems(inputs),
     ...watchlistItems(inputs),
     ...thesisItems(inputs),
     ...alertItems(inputs),
-    ...automationItems(inputs),
+    ...automationItems(todaysRuns),
   ]
   items.sort(compareItems)
 
-  const monitored = union([...inputs.movers.map((m) => m.symbol), ...inputs.diffs.map((d) => d.symbol)])
+  const noMaterialRunSymbols = todaysRuns
+    .filter((run) => run.outcome === 'no_material_update')
+    .flatMap((run) => run.scopeSnapshot?.symbols ?? [])
+  const monitored = union([
+    ...inputs.movers.map((m) => m.symbol),
+    ...inputs.diffs.map((d) => d.symbol),
+    ...noMaterialRunSymbols,
+  ])
   const materialSymbols = union([
     ...inputs.movers
       .filter((m) => Math.abs(m.changePercent) >= MATERIAL_PRICE_MOVE_PCT)
@@ -151,15 +166,20 @@ function watchlistItems(inputs: BriefInputs): BriefItem[] {
 
   const diffItems: BriefItem[] = inputs.diffs
     .filter((diff) => diff.material)
-    .map((diff) => ({
-      id: `watchlist-${diff.symbol}-diff`,
-      symbol: diff.symbol,
-      title: `${diff.symbol} material research change`,
-      message: diff.summary ?? `${diff.changes.length} material change(s) vs the previous report.`,
-      source: 'Watchlist',
-      severity: 'warning',
-      payload: { diffId: diff.id, changes: diff.changes.length },
-    }))
+    .map((diff) => {
+      const provenanceRefs = diff.changes.flatMap((c) => c.evidence)
+      return {
+        id: `diff-${diff.symbol}`,
+        symbol: diff.symbol,
+        title: `${diff.symbol} research changed`,
+        message: diff.summary ?? 'Material research update.',
+        source: 'Watchlist',
+        severity: 'warning',
+        payload: { diffId: diff.id, changes: diff.changes.length },
+        ...(provenanceRefs.length > 0 ? { provenanceRefs } : {}),
+        contextVersion: `diff-${diff.id}`,
+      }
+    })
 
   return [...moverItems, ...diffItems]
 }
@@ -167,15 +187,20 @@ function watchlistItems(inputs: BriefInputs): BriefItem[] {
 function thesisItems(inputs: BriefInputs): BriefItem[] {
   return inputs.diffs
     .filter((diff) => diff.thesisImpact !== undefined && diff.thesisImpact.direction !== 'unchanged')
-    .map((diff) => ({
-      id: `thesis-${diff.symbol}`,
-      symbol: diff.symbol,
-      title: `${diff.symbol} thesis ${diff.thesisImpact?.direction ?? 'unchanged'}`,
-      message: diff.thesisImpact?.summary ?? 'Thesis impact detected.',
-      source: 'Thesis',
-      severity: diff.thesisImpact?.direction === 'invalidated' ? 'critical' : 'warning',
-      payload: { diffId: diff.id, direction: diff.thesisImpact?.direction },
-    }))
+    .map((diff) => {
+      const provenanceRefs = diff.changes.flatMap((c) => c.evidence)
+      return {
+        id: `thesis-${diff.symbol}`,
+        symbol: diff.symbol,
+        title: `${diff.symbol} thesis ${diff.thesisImpact?.direction ?? 'unchanged'}`,
+        message: diff.thesisImpact?.summary ?? 'Thesis impact detected.',
+        source: 'Thesis',
+        severity: diff.thesisImpact?.direction === 'invalidated' ? 'critical' : 'warning',
+        payload: { diffId: diff.id, direction: diff.thesisImpact?.direction },
+        ...(provenanceRefs.length > 0 ? { provenanceRefs } : {}),
+        contextVersion: `diff-${diff.id}`,
+      }
+    })
 }
 
 function alertItems(inputs: BriefInputs): BriefItem[] {
@@ -190,25 +215,48 @@ function alertItems(inputs: BriefInputs): BriefItem[] {
   }))
 }
 
-function automationItems(inputs: BriefInputs): BriefItem[] {
-  return inputs.runs
+function automationItems(runs: AutomationRun[]): BriefItem[] {
+  return runs
     .filter((run) => run.materialChanges > 0 || run.notified)
-    .map((run) => ({
-      id: `automation-${run.id}`,
-      title:
-        run.materialChanges > 0
-          ? `Automation: ${run.materialChanges} material change${run.materialChanges === 1 ? '' : 's'}`
-          : `Automation: ${run.ruleId} completed`,
-      message: `Evaluated ${run.evaluated} securities, analyzed ${run.analyzed}.`,
-      source: 'Automation',
-      severity: run.materialChanges > 0 ? 'warning' : 'info',
-      payload: {
-        ruleId: run.ruleId,
-        evaluated: run.evaluated,
-        analyzed: run.analyzed,
-        failures: run.failures,
-      },
-    }))
+    .map((run) => {
+      const isMaterial = run.materialChanges > 0
+      const provenanceRefs: string[] = []
+      if (isMaterial) {
+        provenanceRefs.push(`automation-run:${run.id}:material`)
+      }
+      return {
+        id: `automation-${run.id}`,
+        title:
+          isMaterial
+            ? `Automation: ${run.materialChanges} material change${run.materialChanges === 1 ? '' : 's'}`
+            : `Automation: ${run.ruleId} completed`,
+        message: `Evaluated ${run.evaluated} securities, analyzed ${run.analyzed}.`,
+        source: 'Automation',
+        severity: isMaterial ? 'warning' : 'info',
+        payload: {
+          ruleId: run.ruleId,
+          evaluated: run.evaluated,
+          analyzed: run.analyzed,
+          failures: run.failures,
+        },
+        ...(provenanceRefs.length > 0 ? { provenanceRefs } : {}),
+        ...(run.id ? { contextVersion: `run-${run.id}` } : {}),
+      }
+    })
+}
+
+/** Use only the latest successful run per rule on the brief's local calendar day. */
+function latestRunsForCurrentDay(runs: AutomationRun[], now: number): AutomationRun[] {
+  const today = new Date(now).toDateString()
+  const sorted = runs
+    .filter((run) => new Date(run.ranAt).toDateString() === today)
+    .slice()
+    .sort((a, b) => b.ranAt - a.ranAt || a.id.localeCompare(b.id))
+  const latestByRule = new Map<string, AutomationRun>()
+  for (const run of sorted) {
+    if (!latestByRule.has(run.ruleId)) latestByRule.set(run.ruleId, run)
+  }
+  return [...latestByRule.values()]
 }
 
 function compareItems(a: BriefItem, b: BriefItem): number {

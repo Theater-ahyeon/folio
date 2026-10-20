@@ -15,6 +15,8 @@ import type { CapabilityExecutor, RunOutcome } from '../capabilities/executor.ts
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const EARNINGS_HORIZON_MS = 7 * DAY_MS;
+/** `research.events` accepts at most 10 `--symbol` flags per run (see screening). */
+const CALENDAR_BATCH = 10;
 const NEWS_RECENT_MS = 7 * DAY_MS;
 const DRAWDOWN_WINDOW_BARS = 20;
 const KLINE_LIMIT = 30;
@@ -28,6 +30,7 @@ type CapabilityRunEntry = PortfolioRiskReport['capabilityRuns'][number];
 /** Facts handed to the synthesizer (same shape the Lead's agent sees). */
 export interface PortfolioRiskSynthesisInput {
   allocation: AllocationItem[];
+  allocationCoverage?: PortfolioRiskReport['allocationCoverage'];
   concentration: PortfolioRiskReport['concentration'];
   signals: RiskSignal[];
   capabilityRuns: PortfolioRiskReport['capabilityRuns'];
@@ -106,8 +109,9 @@ export class PortfolioRiskService {
     if (!quoteCap && hasPositions) runs.push(missingRun('market.quote'));
     for (const outcome of quoteOutcomes) runs.push(toRunEntry(outcome.record));
 
-    const allocation = buildAllocation(rawPositions, quoteOutcomes, summaryPortfolio);
+    const { allocation, coverage: allocationCoverage } = buildAllocation(rawPositions, quoteOutcomes, summaryPortfolio);
     const concentration = computeConcentration(allocation);
+    const hasWholePortfolioWeights = allocationCoverage.basis === 'portfolio';
 
     // ── 3. Market + research + company fetches (evidence + signals) ───────
     const klineCap = this.registry.get('market.kline');
@@ -138,9 +142,20 @@ export class PortfolioRiskService {
     const eventsCap = this.registry.get('research.events');
     let eventsData: unknown;
     if (eventsCap && hasPositions) {
-      const eventsOutcome = await this.executor.run(eventsCap, {}, { signal });
-      runs.push(toRunEntry(eventsOutcome.record));
-      eventsData = eventsOutcome.result?.data;
+      const symbols = allocation.map((item) => item.symbol);
+      const batches: string[][] = [];
+      for (let i = 0; i < symbols.length; i += CALENDAR_BATCH) {
+        batches.push(symbols.slice(i, i + CALENDAR_BATCH));
+      }
+      const eventsOutcomes = await this.executor.runAll(
+        batches.map((batch) => ({
+          cap: eventsCap,
+          input: { eventType: 'financial', symbols: batch },
+        })),
+        { concurrency: SIDE_CONCURRENCY, signal }
+      );
+      for (const outcome of eventsOutcomes) runs.push(toRunEntry(outcome.record));
+      eventsData = collectCalendarEvents(eventsOutcomes);
     } else if (!eventsCap && hasPositions) {
       runs.push(missingRun('research.events'));
     }
@@ -159,9 +174,11 @@ export class PortfolioRiskService {
 
     // ── 4. Signals (spec order) ───────────────────────────────────────────
     const signals: RiskSignal[] = [];
-    const concentrationSignal = buildConcentrationSignal(concentration.top1Weight);
+    const concentrationSignal = hasWholePortfolioWeights
+      ? buildConcentrationSignal(concentration.top1Weight)
+      : null;
     if (concentrationSignal) signals.push(concentrationSignal);
-    signals.push(...buildLargePositionSignals(allocation));
+    if (hasWholePortfolioWeights) signals.push(...buildLargePositionSignals(allocation));
 
     const earningsSignal = buildUpcomingEarningsSignal(allocation, eventsData, nowMs);
     if (earningsSignal) signals.push(earningsSignal);
@@ -171,12 +188,14 @@ export class PortfolioRiskService {
 
     signals.push(...buildDrawdownSignals(allocation, klineOutcomes));
 
-    const sectorSignal = buildSectorExposureSignal(allocation, profileOutcomes);
+    const sectorSignal = hasWholePortfolioWeights
+      ? buildSectorExposureSignal(allocation, profileOutcomes)
+      : null;
     if (sectorSignal) signals.push(sectorSignal);
 
     // ── 5. Summary + report ───────────────────────────────────────────────
     const summary = await this.synthesizer(
-      { allocation, concentration, signals, capabilityRuns: runs },
+      { allocation, allocationCoverage, concentration, signals, capabilityRuns: runs },
       signal
     );
 
@@ -185,6 +204,7 @@ export class PortfolioRiskService {
       generatedAt: nowMs,
       summary,
       allocation,
+      allocationCoverage,
       concentration,
       signals,
       capabilityRuns: runs,
@@ -209,42 +229,63 @@ function buildAllocation(
   rawPositions: Holding[],
   quoteOutcomes: RunOutcome[],
   summary: PortfolioSnapshot | undefined
-): AllocationItem[] {
+): { allocation: AllocationItem[]; coverage: NonNullable<PortfolioRiskReport['allocationCoverage']> } {
   const resolved: Array<{ symbol: string; marketValue: number }> = [];
+  const excludedSymbols: string[] = [];
+  // Without a summary, same-currency positions can still be compared to one
+  // another. Never infer a base currency from a snapshot with an unknown base.
+  const currencies = new Set(rawPositions.map((position) => normalizeCurrency(position.currency)));
+  const inferredCurrency = !summary && currencies.size === 1 ? [...currencies][0] : undefined;
+  const baseCurrency = normalizeCurrency(summary?.baseCurrency) ?? inferredCurrency;
   rawPositions.forEach((position, index) => {
-    const marketValue = resolveMarketValue(position, quoteOutcomes[index]);
-    if (marketValue > 0) resolved.push({ symbol: position.symbol, marketValue });
+    const marketValue = resolveMarketValue(position, quoteOutcomes[index], baseCurrency);
+    if (marketValue === undefined) excludedSymbols.push(position.symbol);
+    else if (marketValue > 0) resolved.push({ symbol: position.symbol, marketValue });
   });
 
-  const total =
-    summary && typeof summary.marketValue === 'number' && summary.marketValue > 0
-      ? summary.marketValue
-      : resolved.reduce((sum, item) => sum + item.marketValue, 0);
+  const reportedTotal = summary?.marketValue;
+  const portfolioTotal = baseCurrency && typeof reportedTotal === 'number'
+    && Number.isFinite(reportedTotal) && reportedTotal > 0 ? reportedTotal : undefined;
+  const basis = excludedSymbols.length > 0 && portfolioTotal === undefined
+    ? 'available-positions' : 'portfolio';
+  const total = portfolioTotal ?? resolved.reduce((sum, item) => sum + item.marketValue, 0);
 
-  return resolved
+  const allocation = resolved
     .map((item) => ({ ...item, weight: total > 0 ? item.marketValue / total : 0 }))
     .sort(byWeightDesc);
+  return { allocation, coverage: { excludedSymbols, basis } };
 }
 
 /**
- * Prefer the position's own market value (base-currency `marketValueBase` first,
- * then `marketValue`); when both are absent, derive it from the quote
- * (quantity × last price). Returns 0 when nothing is available so the caller
- * excludes the position.
+ * A base-currency value is authoritative, including zero. Raw values and quote
+ * prices are usable only when their holding currency matches the known base.
  */
-function resolveMarketValue(position: Holding, quoteOutcome: RunOutcome | undefined): number {
-  if (typeof position.marketValueBase === 'number' && position.marketValueBase > 0) {
+function resolveMarketValue(
+  position: Holding,
+  quoteOutcome: RunOutcome | undefined,
+  baseCurrency: string | undefined
+): number | undefined {
+  if (typeof position.marketValueBase === 'number' && Number.isFinite(position.marketValueBase)
+    && position.marketValueBase >= 0) {
     return position.marketValueBase;
   }
-  if (typeof position.marketValue === 'number' && position.marketValue > 0) {
+  if (!baseCurrency || normalizeCurrency(position.currency) !== baseCurrency) return undefined;
+  if (typeof position.marketValue === 'number' && Number.isFinite(position.marketValue)
+    && position.marketValue > 0) {
     return position.marketValue;
   }
   const quote = quoteOutcome?.result?.data;
   const lastPrice = isQuote(quote) ? quote.lastPrice : undefined;
-  if (typeof lastPrice === 'number' && typeof position.quantity === 'number') {
+  if (typeof lastPrice === 'number' && Number.isFinite(lastPrice)
+    && typeof position.quantity === 'number' && Number.isFinite(position.quantity)) {
     return position.quantity * lastPrice;
   }
-  return 0;
+  return typeof position.marketValue === 'number' && position.marketValue === 0 ? 0 : undefined;
+}
+
+function normalizeCurrency(currency: string | undefined): string | undefined {
+  const normalized = currency?.trim().toUpperCase();
+  return normalized || undefined;
 }
 
 function computeConcentration(allocation: AllocationItem[]): PortfolioRiskReport['concentration'] {
@@ -314,7 +355,7 @@ function buildUpcomingEarningsSignal(
   const matched = new Set<string>();
 
   for (const event of events) {
-    if (typeof event.type !== 'string' || !/earn/i.test(event.type)) continue;
+    if (!isEarningsEvent(event)) continue;
     const at = toEpochMs(event.date);
     if (at === undefined || at < nowMs || at > horizonEnd) continue;
     if (!event.symbol) continue;
@@ -365,7 +406,9 @@ function buildDrawdownSignals(
     const klines = outcome.result.data;
     if (!isKlineArray(klines) || klines.length === 0) return;
 
-    const window = klines.slice(-DRAWDOWN_WINDOW_BARS);
+    const window = [...klines]
+      .sort((a, b) => a.timestamp - b.timestamp)
+      .slice(-DRAWDOWN_WINDOW_BARS);
     let peakHigh = 0;
     for (const bar of window) if (bar.high > peakHigh) peakHigh = bar.high;
     const lastClose = window[window.length - 1]?.close;
@@ -442,16 +485,25 @@ function buildSectorExposureSignal(
 // ── Deterministic local synthesizer ────────────────────────────────────────
 
 export const defaultPortfolioRiskSynthesizer: PortfolioRiskSynthesizer = async (input) => {
-  const { allocation, concentration, signals, capabilityRuns } = input;
+  const { allocation, allocationCoverage, concentration, signals, capabilityRuns } = input;
   if (allocation.length === 0) {
-    return 'Portfolio risk analysis could not be completed: no position data was available.';
+    return (allocationCoverage?.excludedSymbols.length ?? 0) > 0
+      ? 'Portfolio risk analysis could not calculate allocation: no comparable base-currency position values were available.'
+      : 'Portfolio risk analysis could not be completed: no position data was available.';
   }
 
-  const parts: string[] = [
-    `Portfolio holds ${allocation.length} position${allocation.length === 1 ? '' : 's'}; ` +
-      `top position ${pct(concentration.top1Weight)}, top-five ${pct(concentration.top5Weight)}, ` +
-      `Herfindahl ${concentration.herfindahl.toFixed(3)}.`,
-  ];
+  const positionCount = `${allocation.length} position${allocation.length === 1 ? '' : 's'}`;
+  const parts: string[] = allocationCoverage?.basis === 'available-positions'
+    ? [`Analyzed ${positionCount} with comparable values.`]
+    : [
+        `${allocationCoverage?.excludedSymbols.length ? 'Analyzed' : 'Portfolio holds'} ${positionCount}; ` +
+          `top position ${pct(concentration.top1Weight)}, top-five ${pct(concentration.top5Weight)}, ` +
+          `Herfindahl ${concentration.herfindahl.toFixed(3)}.`,
+      ];
+
+  if (allocationCoverage?.basis === 'available-positions') {
+    parts.push('Weights describe available positions only; portfolio-wide concentration and sector signals were not assessed.');
+  }
 
   if (signals.length === 0) {
     parts.push('No material risk signals detected.');
@@ -533,10 +585,31 @@ function isCalendarEvent(value: unknown): value is CalendarEvent {
   return true;
 }
 
+/**
+ * `research.events` returns a bare `CalendarEvent[]` per run (see the manifest),
+ * so the runs are flattened into one list before filtering.
+ */
+function collectCalendarEvents(outcomes: RunOutcome[]): unknown[] {
+  const events: unknown[] = [];
+  for (const outcome of outcomes) {
+    const data = outcome.result?.data;
+    if (Array.isArray(data)) events.push(...data);
+  }
+  return events;
+}
+
 function extractEvents(data: unknown): CalendarEvent[] {
-  if (typeof data !== 'object' || data === null || !('events' in data)) return [];
-  const events = data.events;
-  return Array.isArray(events) ? events.filter(isCalendarEvent) : [];
+  return Array.isArray(data) ? data.filter(isCalendarEvent) : [];
+}
+
+/**
+ * The finance calendar names an earnings announcement `financial` (`report` is
+ * the same event seen from the report/release side — see `automation/runner.ts`).
+ * The previous `/earn/i` test matched neither, so this signal could never fire.
+ */
+function isEarningsEvent(event: CalendarEvent): boolean {
+  const type = (event.type ?? '').toLowerCase();
+  return type === 'financial' || type === 'report';
 }
 
 /** Read an optional `sector` string from company.profile data, if present. */

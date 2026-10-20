@@ -41,13 +41,17 @@ interface SaveRecord {
   calls: number
 }
 
-function clientWithRules(options: { save?: (rule: AutomationRule) => void } = {}): {
+function clientWithRules(options: {
+  save?: (rule: AutomationRule) => void
+  run?: AutomationRun
+} = {}): {
   client: FinagentClient
   saveCalls: SaveRecord[]
   runRuleCalls: string[]
 } {
   const saveCalls: SaveRecord[] = []
   const runRuleCalls: string[] = []
+  const currentRun = options.run ?? RUN
   const client: FinagentClient = {
     ...fallbackClient,
     automation: {
@@ -60,9 +64,9 @@ function clientWithRules(options: { save?: (rule: AutomationRule) => void } = {}
       removeRule: async () => ({ ok: true, data: undefined }),
       runRule: async (input: { ruleId: string }) => {
         runRuleCalls.push(input.ruleId)
-        return { ok: true, data: RUN }
+        return { ok: true, data: currentRun }
       },
-      listRuns: async () => ({ ok: true, data: [RUN] }),
+      listRuns: async () => ({ ok: true, data: [currentRun] }),
       buildBrief: async () => ({ ok: false, error: { code: 'NONE', message: 'missing' } }),
     },
   } as unknown as FinagentClient
@@ -108,6 +112,103 @@ describe('AutomationRulesView', () => {
     expect(text).toContain('Material only')
     expect(text).toContain('Last run')
     expect(text).toContain('5 evaluated')
+
+    await act(async () => {
+      root.unmount()
+    })
+    container.remove()
+  })
+
+  it('shows an explicit no-material-change outcome for a completed run', async () => {
+    const quietRun: AutomationRun = {
+      ...RUN,
+      materialChanges: 0,
+      analyzed: 0,
+      notified: false,
+      outcome: 'no_material_update',
+      scopeSnapshot: {
+        kind: 'portfolio',
+        symbols: ['AAPL.US', 'MSFT.US'],
+        capturedAt: RUN.ranAt,
+      },
+    }
+    const { client } = clientWithRules({ run: quietRun })
+    const { container, root } = render(client)
+
+    await act(async () => {
+      root.render(
+        withI18n(
+          <FinagentClientProvider client={client}>
+            <AutomationRulesView />
+          </FinagentClientProvider>
+        )
+      )
+    })
+    await flushAsync()
+
+    expect(container.textContent ?? '').toContain('No material changes')
+
+    await act(async () => {
+      root.unmount()
+    })
+    container.remove()
+  })
+
+  it('shows the material-update outcome for a run with material changes (#185)', async () => {
+    const materialRun: AutomationRun = {
+      ...RUN,
+      materialChanges: 2,
+      analyzed: 2,
+      notified: true,
+      outcome: 'material_update',
+    }
+    const { client } = clientWithRules({ run: materialRun })
+    const { container, root } = render(client)
+
+    await act(async () => {
+      root.render(
+        withI18n(
+          <FinagentClientProvider client={client}>
+            <AutomationRulesView />
+          </FinagentClientProvider>
+        )
+      )
+    })
+    await flushAsync()
+
+    expect(container.textContent ?? '').toContain('Material changes found')
+
+    await act(async () => {
+      root.unmount()
+    })
+    container.remove()
+  })
+
+  it('shows the incomplete outcome when the run recorded failures (#185)', async () => {
+    const incompleteRun: AutomationRun = {
+      ...RUN,
+      evaluated: 1,
+      materialChanges: 0,
+      analyzed: 0,
+      notified: false,
+      outcome: 'incomplete',
+      failures: ['MSFT.US: quote unavailable'],
+    }
+    const { client } = clientWithRules({ run: incompleteRun })
+    const { container, root } = render(client)
+
+    await act(async () => {
+      root.render(
+        withI18n(
+          <FinagentClientProvider client={client}>
+            <AutomationRulesView />
+          </FinagentClientProvider>
+        )
+      )
+    })
+    await flushAsync()
+
+    expect(container.textContent ?? '').toContain('Run incomplete')
 
     await act(async () => {
       root.unmount()
